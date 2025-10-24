@@ -1,4 +1,4 @@
-from numsim.bitsfunc import leftpad
+from bitsfunc import leftpad
  
 def leftpad(bits, width):
     return [0] * (width - len(bits)) + bits
