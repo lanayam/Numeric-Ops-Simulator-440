@@ -6,5 +6,5 @@
 
 ## Group Information
 * Name: Lizbeth Anaya-Morales & Ibraheem 
-* CWID: 885369413
-* Email: lanayam@csu.fullerton.edu
+* CWID: 885369413 , 884499500
+* Email: lanayam@csu.fullerton.edu , imuhammad23@csu.fullerton.edu
