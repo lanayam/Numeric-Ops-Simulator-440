@@ -1,8 +1,5 @@
 from bitsfunc import leftpad
  
-def leftpad(bits, width):
-    return [0] * (width - len(bits)) + bits
-
 def adder_full (a, b, Cin):
     s = (a ^ b) ^ Cin
     Cout = (a & b) | (Cin & (a ^ b))
