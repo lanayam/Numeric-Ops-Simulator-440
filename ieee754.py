@@ -3,9 +3,9 @@
 # IEEE 754 Floating Point Representation Utilities
 # Helpers for float32: split/pack/classify/round
 
-from .bitsfunc import leftpad, zbits, unsignedcmp
+from .bitsfunc import leftpad
 
-BITS = 127      # sign bit position: 0-127 for float128
+BIAS = 127      # sign bit position: 0-127 for float128
                 # exponent (8bits, bias 127) & fraction (23 bits)
 
 class Class:
@@ -15,11 +15,11 @@ class Class:
     SUBNORMAL = "Subnormal";  # Subnormal number
     NORMAL = "Normal";        # Normalized number
 
-def _split_float32(x_bits):
-    s = f[0]
-    e = f[1:9]
-    f = f[9:32]
-    return s, e, f
+def split_float32(x_bits):
+    x = x_bits[0]
+    y = x_bits[1:9]
+    z = x_bits[9:32]
+    return x, y, z
 
 def f32_unpack(x_bits):
     """
@@ -35,43 +35,50 @@ def f32_unpack(x_bits):
         - normals: [1] + fraction23 (which represents 1.00000)
         - subnormals: [0] + fraction23 (which represents 0.00000)
     """
-    x, y, z = _split(x_bits)
+    sign, exp_bits, frac_bits = split_float32(x_bits)
 
     # Helper flags to see if the number is zero, subnormal, normal, infinity, or NaN
-    all_ones = all(bit == '1' for bit in y)
-    all_zeros = all(bit == '0' for bit in y)
+    all_ones = all(bit == 1 for bit in exp_bits)
+    all_zeros = all(bit == 0 for bit in exp_bits)
 
     if all_ones:
-        if any(z):          # here: if the fraction bits are not all zero, it's a NaN
-            return (Class.NAN, x, 0, [1] + [0]*23)
+        if any(frac_bits):          # here: if the fraction bits are not all zero, it's a NaN
+            return (Class.NAN, sign, 0, [1] + [0]*23)
         else:               # if the fraction bits are all zero, it's an infinity
-            return (Class.INF, x, 0, [1], [0]*23)
+            return (Class.INF, sign, 0, [1], [0]*23)
         
     if all_zeros:
-        if any(z):
-            return (Class.SUBNORMAL, x, -126, [0] + z)
+        if any(frac_bits):
+            return (Class.SUBNORMAL, sign, -126, [0] + frac_bits)
         else:
-            return (Class.ZERO, x, -126, [0], [0]*23)
+            return (Class.ZERO, sign, -126, [0], [0]*23)
         
 
     # If it's a normal number, we need to convert the exponent to an 8-bit binary representation
     exp_conv = 0
 
-    for bit in y:
-        exp_conv = (exp_conv << 1) | bit      # left shifting then adding current bit
+    for b in exp_bits:
+        exp_conv = (exp_conv << 1) | b     # left shifting then adding current bit
 
-    return (Class.NORMAL, x, exp_conv - BITS, [1] + z)     # Return unbiased exponent and significand with the implicit leading 1
+    unbiased_exp = exp_conv - BIAS
+    sig_24 = [1] + frac_bits  # Normalized significand with implicit leading 1
+
+    return (Class.NORMAL, sign, unbiased_exp, sig_24)     # Return unbiased exponent and significand with the implicit leading 1
 
 def int_to_exp(w):
     # Turn a small integer to an 8-bit binary exponent
-    w = max(0, min(w, 255))  # Clamp to 8-bit range
+    if w < 0:
+        w = 0
+    elif w > 255:
+        w = 255
     out = [0] * 8
+
     for i in range(7, -1, -1):
         out[i] = w & 1         # take lowest bit
         w >>= 1                # shift right by 1 to process the next bit
     return out
 
-def bit32_pack(sign, exp_unbs, sig_24, f):
+def f32_pack(sign, exp_unbs, sig_24, f):
     """
     With a normalized sign, exponent, and significand, pack into 32-bit float representation.
         - a significand of 24 bits (including the implicit leading 1) & an unbiased exponent
@@ -94,32 +101,44 @@ def bit32_pack(sign, exp_unbs, sig_24, f):
     kept_bits = sig_24[:24]
     rest_bits = sig_24[24:]
 
-    dropped_bits = tail[0] if len(rest_bits) > 0 else 0
-    round_up = rest_bits[1] if len(rest_bits) > 1 else 0
-    sticky_bit = 1 if any(rest_bits[2:]) else 0
+    if len(rest_bits) > 0:
+        dropped_bits = rest_bits[0]
+    else: 
+        dropped_bits = 0
+    if len(rest_bits) > 1:
+        round_up = rest_bits[1]
+    else:
+        round_up = 0
+    if len(rest_bits) > 2:
+        sticky_bit = 1 if any(rest_bits[2:]) else 0
+    else:
+        sticky_bit = 0
 
     # 2: round to nearest even
     # if the dropped bit is 1 and either the round up bit is 1 or the sticky bit is 1, we need to round up
     # if the dropped bit is 1 and the round up bit is 0 and the sticky bit is 0, we only round up if the 
     #       last kept bit is 1 (to make it even)
 
-    increment = 1 if dropped_bits == 1 and (round_up == 1 or sticky_bit == 1 or kept_bits[-1] == 1) else 0
-    
-    if increment:
+    increment = 0
+    if dropped_bits == 1 and (round_up == 1 or sticky_bit == 1 or kept_bits[-1] == 1):
+        increment = 1
+
+        
+    if increment == 1:
         # will manually add 1 to the kept bits, handling any carry that may occur
         carry = 1
         for i in range(23, -1, -1):
-            sticky_bit = kept_bits[i] + carry
+            sticky_bit = kept_bits[i] ^ carry
             carry = kept_bits[i] & carry
             kept_bits[i] = sticky_bit
 
         if carry == 1:
             kept_bits = [1] + kept_bits[:-1]  # Shift right and add leading 1
             exp_unbs += 1  # Increment the exponent for the carry
-        # 
+        f["inexact"] = True  # Set inexact flag when rounding occurs
 
     # 3: Add bias to the exponent and check for overflow or underflow
-    exp_biased = exp_unbs + BITS
+    exp_biased = exp_unbs + BIAS
 
     if exp_biased >= 255:
         f["overflow"] = True
@@ -128,53 +147,59 @@ def bit32_pack(sign, exp_unbs, sig_24, f):
     
     # Now if exponent is less than or equal to 0, we need to handle subnormal numbers or zero
     if exp_biased <= 0:
-        k = 1 - exp_biased  # Number of bits to shift for subnormal representation
-        m = kept_bits + [0] * k  # Shift the significand to the right by k bits
+        num_shift = 1 - exp_biased  # Number of bits to shift for subnormal representation
+        shifted_right = kept_bits + [0] * k  # Shift the significand to the right by k bits
         sticky_bit = 0
-        for _ in range(k):
-            dropped_bits = m[-1]
-            m = m[:-1]  # Shift right by 1
+        for _ in range(num_shift):
+            dropped_bits = shifted_right[-1]
+            shifted_right = shifted_right[:-1]  # Shift right by 1
             if dropped_bits == 1:
                 sticky_bit = 1  # Set sticky bit if any dropped bit is 1
 
-        tail = m[24:]  # Get the bits that were shifted out for rounding
-        kept = m[:24]  # Get the top 24 bits for the significand
+        tail = shifted_right[24:]  # Get the bits that were shifted out for rounding
+        kept = shifted_right[:24]  # Get the top 24 bits for the significand
 
-        G = 0
-        R = 0
-        S = 0
+        dropped_bits2 = 0
+        round_bits2 = 0
+        sticky_bit2 = 0
 
         # if there is at least 1 dropped bit, that bit is Guard
         if len(tail) > 0:
-            G = tail[0]
+            dropped_bits2 = tail[0]
 
         # if there are at least 2 dropped bits, the second one is Round
         if len(tail) > 1:
-            R = tail[1]
+            round_bits2 = tail[1]
 
         # if there are more dropped bits after that, OR them together → Sticky
         if len(tail) > 2:
             if any(tail[2:]):
-                S = 1
+                sticky_bit2 = 1
 
         # also include the "sticky" from earlier shifts (k shifts)
         if sticky_bit == 1:
-            S = 1
+            sticky_bit2 = 1
 
        # 4: Round to nearest even
-    increment2 = 0
-    if G == 1 and (R == 1 or S == 1 or kept[-1] == 1):
-        increment2 = 1
+        increment2 = 0
 
-    if increment2 == 1:
-        carry = 1
-        for i in range(23, -1, -1):
-            sticky_bit = kept[i] + carry
-            carry = kept[i] & carry
-            kept[i] = sticky_bit
+        if dropped_bits2 == 1 and (round_bits2 == 1 or sticky_bit2 == 1 or kept[-1] == 1):
+            increment2 = 1
+
+        if increment2 == 1:
+            carry = 1
+            for i in range(23, -1, -1):
+                sticky_bit = kept[i] ^ carry
+                carry = kept[i] & carry
+                kept[i] = sticky_bit
+            f["inexact"] = True  # Set inexact flag when rounding occurs
 
         f["underflow"] = True
 
     # subnormal numbers have an exponent of 0 and a significand that is shifted right by the number of bits needed to represent the subnormal
-    return [sign] + [0]*8 + kept[:23]
-        
+        return [sign] + [0]*8 + kept[1:24]
+
+    # *In a normal case, exponent is within 1254 so we can just pack normallly
+    exp_bits = int_to_exp(exp_biased)
+    frac23 = kept_bits[1:24]  # Get the fraction bits (excluding the implicit leading 1)
+    return [sign] + exp_bits + frac23
