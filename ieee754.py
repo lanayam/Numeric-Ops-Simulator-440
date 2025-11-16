@@ -3,7 +3,7 @@
 # IEEE 754 Floating Point Representation Utilities
 # Helpers for float32: split/pack/classify/round
 
-from .bitsfunc import leftpad
+from bitsfunc import leftpad
 
 BIAS = 127      # sign bit position: 0-127 for float128
                 # exponent (8bits, bias 127) & fraction (23 bits)
@@ -45,13 +45,13 @@ def f32_unpack(x_bits):
         if any(frac_bits):          # here: if the fraction bits are not all zero, it's a NaN
             return (Class.NAN, sign, 0, [1] + [0]*23)
         else:               # if the fraction bits are all zero, it's an infinity
-            return (Class.INF, sign, 0, [1], [0]*23)
+            return (Class.INF, sign, 0, [1] + [0]*23)
         
     if all_zeros:
         if any(frac_bits):
             return (Class.SUBNORMAL, sign, -126, [0] + frac_bits)
         else:
-            return (Class.ZERO, sign, -126, [0], [0]*23)
+            return (Class.ZERO, sign, -126, [0]*24)
         
 
     # If it's a normal number, we need to convert the exponent to an 8-bit binary representation
@@ -148,7 +148,8 @@ def f32_pack(sign, exp_unbs, sig_24, f):
     # Now if exponent is less than or equal to 0, we need to handle subnormal numbers or zero
     if exp_biased <= 0:
         num_shift = 1 - exp_biased  # Number of bits to shift for subnormal representation
-        shifted_right = kept_bits + [0] * k  # Shift the significand to the right by k bits
+        # include any extra bits beyond the top 24 (rest_bits) when shifting
+        shifted_right = kept_bits + rest_bits + [0] * num_shift
         sticky_bit = 0
         for _ in range(num_shift):
             dropped_bits = shifted_right[-1]
@@ -176,7 +177,7 @@ def f32_pack(sign, exp_unbs, sig_24, f):
             if any(tail[2:]):
                 sticky_bit2 = 1
 
-        # also include the "sticky" from earlier shifts (k shifts)
+        # also include the "sticky" from earlier shifts (num_shift shifts)
         if sticky_bit == 1:
             sticky_bit2 = 1
 
