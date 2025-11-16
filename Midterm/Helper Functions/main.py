@@ -1,11 +1,11 @@
 from coreapi import core_alu, core_mdu, core_fpu
 
 def main():
-    print("Mini RISC-V ALU / MDU / FPU Tool")
+    print("Mini RISC-V Numeric Operations Simulator Tool")
     print("Type EXIT at any time to quit.")
 
     while True:
-        op = input("Operation (ADD, SUB, MUL, DIV, AND, OR, XOR, FPU ADD, etc): ").strip()
+        op = input("Operation (ADD, SUB, MUL, DIV, AND, OR, XOR, ADD, etc): ").strip()
         if op.upper() == "EXIT":
             break
 
