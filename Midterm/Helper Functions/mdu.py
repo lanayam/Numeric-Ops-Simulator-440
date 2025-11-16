@@ -1,7 +1,7 @@
 from .adderfunc import addripple
 from .bitsfunc import leftpad
 
-def twos_to_sign_mag(bits32):
+def _twos_to_sign_mag(bits32):
     """
     Take a 32-bit two's complement number (list of 0/1)
     and return (sign, magnitude_bits).
@@ -23,7 +23,7 @@ def twos_to_sign_mag(bits32):
         return 1, mag
 
 
-def sign_mag_to_twos(sign, mag_bits):
+def _sign_mag_to_twos(sign, mag_bits):
     """
     Take (sign, magnitude_bits) and return 32-bit two's-complement bits.
 

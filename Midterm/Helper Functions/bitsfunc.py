@@ -1,6 +1,5 @@
 # bits.py
 # functions for manipulating bit lists
-# Completed: Ibraheem Muhammad and Lizbeth Morales
 
 def zbits(n):
     return [0] * n
