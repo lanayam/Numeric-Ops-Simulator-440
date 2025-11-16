@@ -1,8 +1,8 @@
+import ieee754  # always prefer ieee754 first
 from bitsfunc import leftpad
 
-# /Users/csuftitan/Numeric-Ops-Simulator-440/fpu.py
 # IEEE 754 Floating Point Representation Utilities for float32
-# Helpers: split/pack/classify/round and a small FPU wrapper
+# Helpers: split/pack/classify/round and FPU operations
 
 BIAS = 127
 
@@ -13,6 +13,9 @@ class Class:
     SUBNORMAL = "Subnormal"
     NORMAL = "Normal"
 
+# --------------------------------------------------------------------
+# bit manipulation helpers
+# --------------------------------------------------------------------
 def split_float32(x_bits):
     """Expect x_bits as iterable/list of 32 bits [b31(sign), b30..b23(exp), b22..b0(frac)]"""
     if len(x_bits) != 32:
@@ -22,172 +25,27 @@ def split_float32(x_bits):
     frac = x_bits[9:32]
     return sign, exp, frac
 
-def f32_unpack(x_bits):
-    """
-    Turn raw 32 bits into (class, sign, unbiased_exponent, significand_24)
-    significand_24: list of 24 bits including implicit leading 1 for normals,
-                    or leading 0 for subnormals/zero.
-    For special classes we still return a 24-bit pattern for convenience.
-    """
-    sign, exp_bits, frac_bits = split_float32(x_bits)
+def _bits_to_uint(bits):
+    x = 0
+    for b in bits:
+        x = (x << 1) | (1 if b else 0)
+    return x
 
-    all_ones = all(b == 1 for b in exp_bits)
-    all_zeros = all(b == 0 for b in exp_bits)
+def _uint_to_bits(x, width):
+    return [(x >> i) & 1 for i in range(width-1, -1, -1)]
 
-    if all_ones:
-        # Infinity or NaN
-        if any(frac_bits):
-            # Quiet NaN canonicalized to sign-preserving pattern
-            return (Class.NAN, sign, None, [1] + [0]*23)
-        else:
-            return (Class.INF, sign, None, [1] + [0]*23)
-
-    if all_zeros:
-        if any(frac_bits):
-            # subnormal: exponent is -126 (unbiased for smallest normal would be -126),
-            # but subnormals use exponent field 0. Represent significand with leading 0.
-            return (Class.SUBNORMAL, sign, -126, [0] + list(frac_bits))
-        else:
-            return (Class.ZERO, sign, -126, [0] + [0]*23)
-
-    # normal case: convert exp bits to integer then subtract bias
-    exp_val = 0
-    for b in exp_bits:
-        exp_val = (exp_val << 1) | (1 if b else 0)
-    unbiased = exp_val - BIAS
-    sig_24 = [1] + list(frac_bits)
-    return (Class.NORMAL, sign, unbiased, sig_24)
-
-def int_to_exp(w):
-    """Clamp w to [0,255] and return 8-bit list MSB..LSB"""
-    if w < 0:
-        w = 0
-    elif w > 255:
-        w = 255
-    out = [0] * 8
-    for i in range(7, -1, -1):
-        out[i] = w & 1
-        w >>= 1
-    return out
-
-def _add_one_to_bits(bits):
-    """Add 1 to a list of bits (MSB..LSB). Returns (result_bits, carry_out)"""
-    out = bits[:]  # copy
-    carry = 1
-    for i in range(len(out)-1, -1, -1):
-        total = out[i] + carry
-        out[i] = total & 1
-        carry = 1 if total > 1 else 0
-        if carry == 0:
-            break
-    return out, carry
-
-def f32_pack(sign, exp_unbs, sig_24, f):
-    """
-    Pack sign, unbiased exponent, and a significand (list of bits, at least 24 bits)
-    into a 32-bit float bit-pattern list [sign] + [8 exp bits] + [23 frac bits].
-    Rounding is round-to-nearest-even. f is a dict for flags: 'inexact','overflow','underflow'
-    """
-    # normalize inputs
-    sig = list(sig_24[:])  # copy
-    if len(sig) < 24:
-        sig += [0] * (24 - len(sig))
-
-    rest = sig[24:] if len(sig) > 24 else []
-    kept = sig[:24]
-
-    # derive guard/round/sticky from rest
-    g = rest[0] if len(rest) >= 1 else 0
-    r = rest[1] if len(rest) >= 2 else 0
-    sticky = 1 if any(rest[2:]) else 0
-
-    # inexact if any dropped bits are 1
-    if any(rest):
-        f["inexact"] = True
-
-    # round-to-nearest-even
-    increment = 0
-    if g == 1 and (r == 1 or sticky == 1 or kept[-1] == 1):
-        increment = 1
-
-    if increment:
-        kept, carry = _add_one_to_bits(kept)
-        if carry:
-            # overflowed the 24-bit significand: produce a new leading 1 and drop LSB
-            kept = [1] + kept[:-1]
-            exp_unbs += 1
-        f["inexact"] = True
-
-    exp_biased = exp_unbs + BIAS
-
-    # overflow -> infinity
-    if exp_biased >= 255:
-        f["overflow"] = True
-        f["inexact"] = True
-        return [sign] + [1]*8 + [0]*23
-
-    # handle subnormal/zero when biased exponent <= 0
-    if exp_biased <= 0:
-        # need to shift the (implicit-1-included) kept right by (1 - exp_biased)
-        shift = 1 - exp_biased
-        # create an extended significand to shift (kept + any following bits)
-        ext = kept[:] + rest[:]  # ext contains all low-order bits that can create sticky
-        # perform logical right shift by 'shift' positions, collecting sticky
-        if shift >= len(ext):
-            shifted = [0] * len(ext)
-            sticky2 = 1 if any(ext) else 0
-        else:
-            # bits that will remain after shifting
-            shifted = ext[:len(ext)-shift]
-            dropped = ext[len(ext)-shift:]
-            sticky2 = 1 if any(dropped) else 0
-
-        # Now shifted contains the top bits (MSB..LSB) of the adjusted significand.
-        # We need top 24 bits to form rounding guard/round/sticky for subnormal result.
-        top24 = shifted[:24] if len(shifted) >= 24 else ([0]*(24 - len(shifted)) + shifted)
-        tail = shifted[24:] if len(shifted) > 24 else []
-        # derive guard/round/sticky for final rounding
-        g2 = tail[0] if len(tail) >= 1 else 0
-        r2 = tail[1] if len(tail) >= 2 else 0
-        sticky_final = 1 if sticky2 or any(tail[2:]) else 0
-
-        # round to nearest even for subnormal
-        inc2 = 0
-        if g2 == 1 and (r2 == 1 or sticky_final == 1 or top24[-1] == 1):
-            inc2 = 1
-
-        if inc2:
-            top24, carry2 = _add_one_to_bits(top24)
-            if carry2:
-                # Rare case where rounding a subnormal produces a non-subnormal normal;
-                # this means exponent becomes 1 (biased), and significand must be normalized.
-                exp_biased = 1
-                frac23 = top24[1:24]
-                f["inexact"] = True
-                return [sign] + int_to_exp(exp_biased) + frac23
-            f["inexact"] = True
-
-        f["underflow"] = True
-        # subnormal encoding uses exponent bits = 0
-        frac23 = top24[1:24]
-        return [sign] + [0]*8 + frac23
-
-    # normal case
-    exp_bits = int_to_exp(exp_biased)
-    frac23 = kept[1:24]
-    return [sign] + exp_bits + frac23
-
-# Small FPU wrapper that will prefer functions from .ieee754 if available.
+# --------------------------------------------------------------------
+# Main FPU class using ieee754 as reference for packing/unpacking
+# --------------------------------------------------------------------
 class FPU:
     def __init__(self):
         self.flags = {"inexact": False, "overflow": False, "underflow": False}
-        # try to import external implementations if present
-        try:
-            from . import ieee754  # optional module in same package
-            # prefer their implementations if available
-            self.unpack = getattr(ieee754, "f32_unpack", f32_unpack)
-            self.pack = getattr(ieee754, "f32_pack", f32_pack)
-        except Exception:
+        # Always prefer ieee754 for pack/unpack
+        self.unpack = getattr(ieee754, "f32_unpack", None)
+        self.pack = getattr(ieee754, "f32_pack", None)
+        if self.unpack is None or self.pack is None:
+            # fallback to local definitions if ieee754 not found
+            from fpu import f32_unpack, f32_pack
             self.unpack = f32_unpack
             self.pack = f32_pack
 
@@ -195,7 +53,126 @@ class FPU:
         return self.unpack(bits32)
 
     def f32_pack(self, sign, exp_unbs, sig_24):
-        # reset flags per operation
         self.flags = {"inexact": False, "overflow": False, "underflow": False}
         out = self.pack(sign, exp_unbs, sig_24, self.flags)
         return out, self.flags
+
+    # ----------------------------------------------------------------
+    # IEEE 754 Arithmetic (round-to-nearest, ties-to-even)
+    # ----------------------------------------------------------------
+    def f32_add(self, a_bits, b_bits):
+        ca, sa, ea, ma = self.f32_unpack(a_bits)
+        cb, sb, eb, mb = self.f32_unpack(b_bits)
+
+        # Handle NaN, Inf, Zero
+        if ca == Class.NAN: return (a_bits, {"inexact": True})
+        if cb == Class.NAN: return (b_bits, {"inexact": True})
+        if ca == Class.INF and cb == Class.INF and sa != sb:
+            # +Inf + -Inf = NaN
+            return ([0,1,1,1,1,1,1,1,1]+[1]+[0]*22, {"inexact": True})
+        if ca == Class.INF: return (a_bits, {"inexact": False})
+        if cb == Class.INF: return (b_bits, {"inexact": False})
+        if ca == Class.ZERO: return (b_bits, {"inexact": False})
+        if cb == Class.ZERO: return (a_bits, {"inexact": False})
+
+        # Convert mantissas to integers
+        ia = _bits_to_uint(ma)
+        ib = _bits_to_uint(mb)
+        sgn = sa
+        e = ea
+
+        # Align exponents
+        if ea > eb:
+            shift = ea - eb
+            ib >>= min(shift, 31)
+            e = ea
+        elif eb > ea:
+            shift = eb - ea
+            ia >>= min(shift, 31)
+            e = eb
+
+        # Add/Sub based on sign
+        if sa == sb:
+            sig = ia + ib
+            sgn = sa
+            if sig >= (1 << 24):
+                sig >>= 1
+                e += 1
+        else:
+            if ia >= ib:
+                sig = ia - ib
+                sgn = sa
+            else:
+                sig = ib - ia
+                sgn = sb
+            while sig and sig < (1 << 23):
+                sig <<= 1
+                e -= 1
+
+        if sig == 0:
+            return ([sgn]+[0]*8+[0]*23, {"inexact": False})
+
+        sig_bits = _uint_to_bits(sig, 24)
+        out, flags = self.f32_pack(sgn, e, sig_bits)
+        return out, flags
+
+    def f32_sub(self, a_bits, b_bits):
+        bb = b_bits[:]
+        bb[0] ^= 1
+        return self.f32_add(a_bits, bb)
+
+    def f32_mul(self, a_bits, b_bits):
+        ca, sa, ea, ma = self.f32_unpack(a_bits)
+        cb, sb, eb, mb = self.f32_unpack(b_bits)
+        if ca == Class.NAN: return (a_bits, {"inexact": True})
+        if cb == Class.NAN: return (b_bits, {"inexact": True})
+        if (ca == Class.INF and cb == Class.ZERO) or (cb == Class.INF and ca == Class.ZERO):
+            return ([0,1,1,1,1,1,1,1,1]+[1]+[0]*22, {"inexact": True})
+        if ca == Class.INF or cb == Class.INF:
+            sgn = sa ^ sb
+            return ([sgn]+[1]*8+[0]*23, {"overflow": True})
+        if ca == Class.ZERO or cb == Class.ZERO:
+            sgn = sa ^ sb
+            return ([sgn]+[0]*8+[0]*23, {"underflow": True})
+
+        sgn = sa ^ sb
+        ia = _bits_to_uint(ma)
+        ib = _bits_to_uint(mb)
+        e = ea + eb
+
+        prod = ia * ib
+        if (prod >> 47) == 1:
+            prod >>= 1
+            e += 1
+        frac = (prod >> 23) & ((1 << 24) - 1)
+        out, flags = self.f32_pack(sgn, e, _uint_to_bits(frac, 24))
+        return out, flags
+
+    def f32_div(self, a_bits, b_bits):
+        ca, sa, ea, ma = self.f32_unpack(a_bits)
+        cb, sb, eb, mb = self.f32_unpack(b_bits)
+        if ca == Class.NAN: return (a_bits, {"inexact": True})
+        if cb == Class.NAN: return (b_bits, {"inexact": True})
+        if (ca == Class.INF and cb == Class.INF) or (ca == Class.ZERO and cb == Class.ZERO):
+            return ([0,1,1,1,1,1,1,1,1]+[1]+[0]*22, {"inexact": True})
+        if ca == Class.INF:
+            sgn = sa ^ sb
+            return ([sgn]+[1]*8+[0]*23, {"overflow": True})
+        if cb == Class.INF:
+            sgn = sa ^ sb
+            return ([sgn]+[0]*8+[0]*23, {"underflow": True})
+        if cb == Class.ZERO:
+            sgn = sa ^ sb
+            return ([sgn]+[1]*8+[0]*23, {"overflow": True})
+        if ca == Class.ZERO:
+            sgn = sa ^ sb
+            return ([sgn]+[0]*8+[0]*23, {"underflow": True})
+
+        sgn = sa ^ sb
+        ia = _bits_to_uint(ma)
+        ib = _bits_to_uint(mb)
+        e = ea - eb
+        quo = (ia << 23) // ib
+        frac = quo & ((1 << 24) - 1)
+        out, flags = self.f32_pack(sgn, e, _uint_to_bits(frac, 24))
+        return out, flags
